@@ -39,6 +39,7 @@
 #ifndef SEMANTIC_SEGMENTATION_LAYER__SEGMENTATION_BUFFER_HPP_
 #define SEMANTIC_SEGMENTATION_LAYER__SEGMENTATION_BUFFER_HPP_
 
+#include <deque>
 #include <list>
 #include <string>
 #include <vector>

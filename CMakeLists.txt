@@ -12,7 +12,6 @@ find_package(geometry_msgs REQUIRED)
 find_package(message_filters REQUIRED)
 find_package(nav2_costmap_2d REQUIRED)
 find_package(nav2_util REQUIRED)
-find_package(nav2_util REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
@@ -40,19 +39,22 @@ target_include_directories(semantic_segmentation_layer
     $<INSTALL_INTERFACE:include>
 )
 
-target_link_libraries(semantic_segmentation_layer
-  PUBLIC
-    message_filters::message_filters
-    nav2_costmap_2d::nav2_costmap_2d_core
-    nav2_util::nav2_util_core
-    nav2_util::nav2_util_core
-    pluginlib::pluginlib
-    rclcpp::rclcpp
-    rclcpp_lifecycle::rclcpp_lifecycle
-    tf2::tf2
-    tf2_ros::tf2_ros
-    tf2_sensor_msgs::tf2_sensor_msgs
-    ${vision_msgs_TARGETS}
+ament_target_dependencies(semantic_segmentation_layer
+  geometry_msgs
+  message_filters
+  nav2_costmap_2d
+  nav2_util
+  nav_msgs
+  pluginlib
+  rclcpp
+  rclcpp_lifecycle
+  sensor_msgs
+  std_msgs
+  tf2
+  tf2_ros
+  tf2_geometry_msgs
+  tf2_sensor_msgs
+  vision_msgs
 )
 
 # Install library
