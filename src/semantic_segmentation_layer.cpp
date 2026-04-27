@@ -333,6 +333,7 @@ void SemanticSegmentationLayer::updateBounds(double robot_x, double robot_y, dou
   {
     auto buffer = tile_map_pair.second;
     buffer->lock();
+    tile_map_pair.first->lock();
     
     // Purge old observations in updateBounds before computing costs to ensure the costmap accurately reflects the current state after decay, maintaining consistency between the buffer and the costmap.
     tile_map_pair.first->purgeOldObservations(current_time);
@@ -365,6 +366,7 @@ void SemanticSegmentationLayer::updateBounds(double robot_x, double robot_y, dou
       }
       touch(tile_world_coords.x, tile_world_coords.y, min_x, min_y, max_x, max_y);
     }
+    tile_map_pair.first->unlock();
     buffer->unlock();
   }
 
