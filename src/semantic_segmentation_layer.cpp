@@ -38,7 +38,9 @@
 #include "semantic_segmentation_layer/semantic_segmentation_layer.hpp"
 
 #include <algorithm>
+#include <limits>
 
+#include "nav2_costmap_2d/cost_values.hpp"
 #include "nav2_costmap_2d/costmap_math.hpp"
 #include "nav2_costmap_2d/footprint.hpp"
 #include "rclcpp/parameter_events_filter.hpp"
@@ -113,6 +115,10 @@ void SemanticSegmentationLayer::onInitialize()
     declareParameter(source + "." + "tile_map_decay_time", rclcpp::ParameterValue(5.0));
     declareParameter(source + "." + "visualize_tile_map", rclcpp::ParameterValue(false));
     declareParameter(source + "." + "use_cost_selection", rclcpp::ParameterValue(true));
+    // PR3: raytrace-clearing per-source params (default off; opt in per source).
+    declareParameter(source + "." + "clearing", rclcpp::ParameterValue(false));
+    declareParameter(source + "." + "raytrace_max_range", rclcpp::ParameterValue(8.0));
+    declareParameter(source + "." + "raytrace_min_range", rclcpp::ParameterValue(0.0));
     
     node->get_parameter(name_ + "." + source + "." + "segmentation_topic", segmentation_topic);
     node->get_parameter(name_ + "." + source + "." + "confidence_topic", confidence_topic);
@@ -127,6 +133,12 @@ void SemanticSegmentationLayer::onInitialize()
     node->get_parameter(name_ + "." + source + "." + "visualize_tile_map", visualize_tile_map);
     bool use_cost_selection = true;
     node->get_parameter(name_ + "." + source + "." + "use_cost_selection", use_cost_selection);
+    // PR3: raytrace-clearing params, applied to the buffer after construction.
+    bool clearing = false;
+    double raytrace_max_range = 8.0, raytrace_min_range = 0.0;
+    node->get_parameter(name_ + "." + source + "." + "clearing", clearing);
+    node->get_parameter(name_ + "." + source + "." + "raytrace_max_range", raytrace_max_range);
+    node->get_parameter(name_ + "." + source + "." + "raytrace_min_range", raytrace_min_range);
     if (class_types_string.empty())
     {
       RCLCPP_ERROR(logger_, "no class types defined for source %s. Segmentation plugin cannot work this way", source.c_str());
@@ -196,6 +208,16 @@ void SemanticSegmentationLayer::onInitialize()
       min_obstacle_distance, *tf_, global_frame_, "",
       tf2::durationFromSec(transform_tolerance), getResolution(), tile_map_decay_time, visualize_tile_map,
       use_cost_selection);
+
+    // PR3: enable per-frame clearing-observation capture and set raytrace ranges.
+    segmentation_buffer->setClearingEnabled(clearing);
+    segmentation_buffer->setRaytraceMaxRange(raytrace_max_range);
+    segmentation_buffer->setRaytraceMinRange(raytrace_min_range);
+    if (clearing) {
+      RCLCPP_INFO(logger_,
+                  "PR3 raytrace clearing enabled for source %s (raytrace_max=%.2fm, raytrace_min=%.2fm)",
+                  source.c_str(), raytrace_max_range, raytrace_min_range);
+    }
 
     segmentation_buffers_.push_back(segmentation_buffer);
     
@@ -334,7 +356,14 @@ void SemanticSegmentationLayer::updateBounds(double robot_x, double robot_y, dou
     auto buffer = tile_map_pair.second;
     buffer->lock();
     tile_map_pair.first->lock();
-    
+
+    // PR3: raytrace-clear cells along the sensor->point rays from the latest
+    // captured observation BEFORE the marking loop below. This mirrors
+    // nav2_costmap_2d::ObstacleLayer (clearing pass then marking pass) so
+    // any cells the camera "sees through" go FREE_SPACE while cells with
+    // a current observation get re-marked LETHAL on top.
+    raytraceFreespace(buffer, min_x, min_y, max_x, max_y);
+
     // Purge old observations in updateBounds before computing costs to ensure the costmap accurately reflects the current state after decay, maintaining consistency between the buffer and the costmap.
     tile_map_pair.first->purgeOldObservations(current_time);
         
@@ -651,6 +680,104 @@ void SemanticSegmentationLayer::deactivate()
       pointcloud_subs_[i]->unsubscribe();
     }
   }
+}
+
+namespace {
+// PR3: tiny functor analogous to nav2_costmap_2d::ObstacleLayer's MarkCell.
+// raytraceLine invokes operator() on every cell index along the Bresenham
+// path; we write FREE_SPACE (0) into our own costmap_ array.
+class FreeSpaceMarker
+{
+public:
+    FreeSpaceMarker(unsigned char* costmap, unsigned char value)
+      : costmap_(costmap), value_(value) {}
+    inline void operator()(unsigned int offset) { costmap_[offset] = value_; }
+private:
+    unsigned char* costmap_;
+    unsigned char value_;
+};
+}  // anonymous namespace
+
+void SemanticSegmentationLayer::raytraceFreespace(
+    const std::shared_ptr<semantic_segmentation_layer::SegmentationBuffer>& buffer,
+    double* min_x, double* min_y, double* max_x, double* max_y)
+{
+    SegmentationBuffer::ClearingObservation obs;
+    if (!buffer->getClearingObservation(obs)) {
+        return;  // clearing disabled, or no frame received yet
+    }
+
+    const double ox = obs.origin.x;
+    const double oy = obs.origin.y;
+
+    // Sensor origin in cell coords. If origin is off the rolling window
+    // entirely we can't raytrace from it; bail.
+    unsigned int x0, y0;
+    if (!worldToMap(ox, oy, x0, y0)) {
+        RCLCPP_DEBUG(logger_,
+                     "Sensor origin (%.2f, %.2f) outside costmap; skipping clearing pass",
+                     ox, oy);
+        return;
+    }
+
+    const double sq_max = buffer->getSqRaytraceMaxRange();
+    const double sq_min = buffer->getSqRaytraceMinRange();
+    const double map_end_x = origin_x_ + size_x_ * resolution_;
+    const double map_end_y = origin_y_ + size_y_ * resolution_;
+
+    FreeSpaceMarker marker(costmap_, nav2_costmap_2d::FREE_SPACE);
+
+    for (const auto& pt : obs.points) {
+        double wx = pt.x;
+        double wy = pt.y;
+
+        // 2D distance gate (Bresenham is 2D; z is irrelevant for the line).
+        const double dx = wx - ox;
+        const double dy = wy - oy;
+        const double sq2d = dx * dx + dy * dy;
+        if (sq2d > sq_max || (sq_min > 0.0 && sq2d < sq_min)) {
+            continue;
+        }
+
+        // Clip the ray endpoint to the map rectangle so worldToMap succeeds.
+        // Same trick ObstacleLayer uses (obstacle_layer.cpp:670-691): if the
+        // endpoint is outside, scale the ray back along its direction until it
+        // hits the map boundary.
+        if (wx < origin_x_) {
+            const double t = (origin_x_ - ox) / dx;
+            wx = origin_x_;
+            wy = oy + dy * t;
+        } else if (wx > map_end_x) {
+            const double t = (map_end_x - ox) / dx;
+            wx = map_end_x - 0.001;
+            wy = oy + dy * t;
+        }
+        if (wy < origin_y_) {
+            const double t = (origin_y_ - oy) / dy;
+            wy = origin_y_;
+            wx = ox + dx * t;
+        } else if (wy > map_end_y) {
+            const double t = (map_end_y - oy) / dy;
+            wy = map_end_y - 0.001;
+            wx = ox + dx * t;
+        }
+
+        unsigned int x1, y1;
+        if (!worldToMap(wx, wy, x1, y1)) {
+            continue;
+        }
+
+        // Bresenham-walk the ray, writing FREE_SPACE along the way. We don't
+        // bound by cell-distance: the world-space gate above already enforces
+        // raytrace_max_range, and Bresenham terminates at (x1, y1).
+        const unsigned int cell_max_length = std::numeric_limits<unsigned int>::max();
+        raytraceLine(marker, x0, y0, x1, y1, cell_max_length);
+
+        // Grow the layer's update bounds to cover this ray's endpoint so the
+        // master grid merge picks up the cleared cells.
+        touch(wx, wy, min_x, min_y, max_x, max_y);
+    }
+    touch(ox, oy, min_x, min_y, max_x, max_y);
 }
 
 }  // namespace semantic_segmentation_layer

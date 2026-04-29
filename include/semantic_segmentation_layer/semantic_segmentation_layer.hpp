@@ -136,6 +136,20 @@ class SemanticSegmentationLayer : public nav2_costmap_2d::CostmapLayer
 
     rcl_interfaces::msg::SetParametersResult dynamicParametersCallback(std::vector<rclcpp::Parameter> parameters);
 
+   protected:
+    /**
+     * @brief Mark cells along rays from the buffer's latest sensor origin to
+     * each captured (finite, in-range) cloud point as FREE_SPACE in this
+     * layer's costmap_. Mirrors nav2_costmap_2d::ObstacleLayer::raytraceFreespace.
+     * Caller MUST hold buffer->lock() (already true in updateBounds).
+     *
+     * @param buffer the SegmentationBuffer to pull the latest clearing observation from
+     * @param min_x,min_y,max_x,max_y bounds rectangle to grow as cells are touched
+     */
+    void raytraceFreespace(
+        const std::shared_ptr<semantic_segmentation_layer::SegmentationBuffer>& buffer,
+        double* min_x, double* min_y, double* max_x, double* max_y);
+
    private:
     void syncSegmPointcloudCb(const std::shared_ptr<const sensor_msgs::msg::Image>& segmentation,
                               const std::shared_ptr<const sensor_msgs::msg::PointCloud2>& pointcloud,
