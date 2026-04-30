@@ -138,7 +138,7 @@ void SegmentationBuffer::bufferSegmentation(
     sensor_msgs::PointCloud2ConstIterator<float> iter_y_global(global_frame_cloud, "y");
     sensor_msgs::PointCloud2ConstIterator<float> iter_z_global(global_frame_cloud, "z");
     std::unordered_map<TileIndex, int> best_observations_idxs;
-    double cloud_time_seconds = rclcpp::Time(cloud.header.stamp.sec, cloud.header.stamp.nanosec).seconds();
+    double cloud_time_seconds = clock_->now().seconds();  // FIX: use wall-clock instead of cloud header stamp (which lags ~4s on ZED), keeping decay_time consistent with layer purge
 
     // PR3: also accumulate every finite, in-range point (in global_frame_) so the
     // layer's raytraceFreespace pass can clear cells along rays from the sensor
